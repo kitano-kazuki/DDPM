@@ -25,10 +25,11 @@ STORE_PATH_FASHION = f"ddpm_model_fashion.pt"
 
 no_train = False
 fashion = True
-batch_size = 1
+batch_size = 20
 n_epochs = 20
 lr = 0.001
 store_path = "ddpm_fashion.pt" if fashion else "ddpm_mnist.pt"
+device = "cpu"
 
 def show_images(images, title=""):
     if type(images) is torch.Tensor:
@@ -66,7 +67,7 @@ def show_forward(ddpm, loader, device):
         for percent in [0.25, 0.5, 0.75, 1]:
             show_images(
                 ddpm(imgs.to(device),[int(percent * ddpm.n_steps) - 1 for _ in range(len(imgs))]), f"DDPM Noisy images {int(percent * 100)}%")
-            break
+        break
 
 def generate_new_images(ddpm, n_samples=16, device=None, frames_per_gif=100, gif_name="sampling.gif",c=1, h=28, w=28):
     frame_idxs = np.linespace(0,ddpm.n_steps, frames_per_gif).astype(np.uint)
@@ -128,12 +129,6 @@ def sinusoidal_embedding(n,d):
     embedding[:,1::2] = torch.cos(t * wk[:,::2])    # isn't wk[:,1::2] correct?
     return embedding
 
-def _make_te(self, dim_in, dim_out):
-    return nn.Sequential(
-        nn.Linear(dim_in, dim_out),
-        nn.SiLU(),
-        nn.Linear(dim_out, dim_out)
-    )
 
 
 transform = Compose([
@@ -187,3 +182,111 @@ class MyBlock(nn.Module):
         out = self.conv2(out)
         out = self.activation(out)
         return out
+
+class MyUnet(nn.Module):
+    def __init__(self, n_steps=1000, time_emb_dim=100):
+        super(MyUnet, self).__init__()
+
+        self.time_embed = nn.Embedding(n_steps, time_emb_dim)
+        self.time_embed.weight.data = sinusoidal_embedding(n_steps, time_emb_dim)
+        self.time_embed.requires_grad_(False)
+
+        self.te1 = self._make_te(time_emb_dim, 1)
+        self.b1 = nn.Sequential(
+            MyBlock((1,28,28), 1, 10),
+            MyBlock((10,28,28), 10, 10),
+            MyBlock((10,28,28), 10 , 10)
+        )
+        self.down1 = nn.Conv2d(10,10,4,2,1)
+
+        self.te2 = self._make_te(time_emb_dim, 10)
+        self.b2 = nn.Sequential(
+            MyBlock((10,14,14), 10, 20),
+            MyBlock((20,14,14), 20, 20),
+            MyBlock((20,14,14), 20, 20)
+        )
+        self.down2 = nn.Conv2d(20,20,4,2,1)
+
+        self.te3 = self._make_te(time_emb_dim, 20)
+        self.b3 = nn.Sequential(
+            MyBlock((20,7,7), 20, 40),
+            MyBlock((40,7,7), 40, 40),
+            MyBlock((40,7,7), 40, 40),
+        )
+        self.down3 = nn.Sequential(
+            nn.Conv2d(40,40,2,1),
+            nn.SiLU(),
+            nn.Conv2d(40,40,4,2,1)
+        )
+
+        self.te_mid = self._make_te(time_emb_dim,40)
+        self.b_mid = nn.Sequential(
+            MyBlock((40,3,3), 40, 20),
+            MyBlock((20,3,3), 20, 20),
+            MyBlock((20,3,3), 20, 40)
+        )
+
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(40,40,4,2,1),
+            nn.SiLU(),
+            nn.ConvTranspose2d(40,40,2,1)
+        )
+        self.te4 = self._make_te(time_emb_dim, 80)
+        self.b4 = nn.Sequential(
+            MyBlock((80,7,7),80,40),
+            MyBlock((40,7,7),40,20),
+            MyBlock((20,7,7),20,20),
+        )
+
+        self.up2 = nn.ConvTranspose2d(20, 20, 4, 2, 1)
+        self.te5 = self._make_te(time_emb_dim, 40)
+        self.b5 = nn.Sequential(
+            MyBlock((40, 14, 14), 40, 20),
+            MyBlock((20, 14, 14), 20, 10),
+            MyBlock((10, 14, 14), 10, 10)
+        )
+
+        self.up3 = nn.ConvTranspose2d(10, 10, 4, 2, 1)
+        self.te_out = self._make_te(time_emb_dim, 20)
+        self.b_out = nn.Sequential(
+            MyBlock((20, 28, 28), 20, 10),
+            MyBlock((10, 28, 28), 10, 10),
+            MyBlock((10, 28, 28), 10, 10, normalize=False)
+        )
+
+        self.conv_out = nn.Conv2d(10, 1, 3, 1, 1)
+
+
+    def forward(self, x, t):
+        t = self.time_embed(t)
+        n = len(x)
+        out1 = self.b1(x + self.te1(t).reshape(n, -1, 1, 1))
+        out2 = self.b2(self.down1(out1) + self.te2(t).reshape(n, -1, 1,1))
+        out3 = self.b3(self.down2(out2) + self.te3(t).reshape(n,-1,1,1))
+
+        out_mid = self.b_mid(self.down3(out3) + self.te_mid(t).reshape(n,-1,1,1))
+
+        out4 = torch.cat((out3, self.up1(out_mid)), dim=1)  # (N, 80, 7, 7)
+        out4 = self.b4(out4 + self.te4(t).reshape(n, -1, 1, 1))  # (N, 20, 7, 7)
+
+        out5 = torch.cat((out2, self.up2(out4)), dim=1)  # (N, 40, 14, 14)
+        out5 = self.b5(out5 + self.te5(t).reshape(n, -1, 1, 1))  # (N, 10, 14, 14)
+
+        out = torch.cat((out1, self.up3(out5)), dim=1)  # (N, 20, 28, 28)
+        out = self.b_out(out + self.te_out(t).reshape(n, -1, 1, 1))  # (N, 1, 28, 28)
+
+        out = self.conv_out(out)
+
+        return out
+
+    def _make_te(self, dim_in, dim_out):
+        return nn.Sequential(
+            nn.Linear(dim_in, dim_out),
+            nn.SiLU(),
+            nn.Linear(dim_out, dim_out)
+        )
+
+n_steps, min_beta, max_beta = 1000, 10 ** -4, 0.02  # Originally used by the authors
+ddpm = MyDDPM(MyUnet(n_steps), n_steps=n_steps, min_beta=min_beta, max_beta=max_beta, device=device)
+
+show_forward(ddpm, loader, device)
