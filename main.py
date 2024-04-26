@@ -342,8 +342,8 @@ sum([p.numel() for p in ddpm.parameters()])
 # show_forward(ddpm, loader, device)
 
 # Optionally, show the denoising (backward) process
-generated = generate_new_images(ddpm, gif_name="before_training.gif")
-show_images(generated, "Images generated before training")
+# generated = generate_new_images(ddpm, gif_name="before_training.gif")
+# show_images(generated, "Images generated before training")
 
 def training_loop(ddpm, loader, n_epochs, optim, device, display=False, store_path="ddpm_model.pt"):
     mse = nn.MSELoss()
