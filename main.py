@@ -1,5 +1,6 @@
 # Import of libraries
 import random
+import time
 import imageio
 import numpy as np
 from argparse import ArgumentParser
@@ -401,12 +402,16 @@ best_model.eval()
 print("Model loaded")
 
 print("Generating new images")
+start = time.time()
 generated = generate_new_images(
         best_model,
         n_samples=100,
         device=device,
         gif_name="fashion.gif" if fashion else "mnist.gif"
     )
+end = time.time()
+execution_time = end - start
+print(f"Execution time: {execution_time:.2f} seconds")
 show_images(generated, "Final result")
 
 from IPython.display import Image
